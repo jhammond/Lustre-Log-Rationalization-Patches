@@ -1,0 +1,4 @@
+Included are two patches implementing "printk() rationalazation for
+RHEL 5.5 and Lustre 1.8.5.
+
+The Lustre patch needs to be broken up and reviewed but works for us.
