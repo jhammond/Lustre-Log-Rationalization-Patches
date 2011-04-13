@@ -1,0 +1,1168 @@
+diff -X dontdiff -uprN 0/lnet/include/libcfs/kp30.h 1/lnet/include/libcfs/kp30.h
+--- 0/lnet/include/libcfs/kp30.h	2010-07-23 18:26:03.000000000 -0500
++++ 1/lnet/include/libcfs/kp30.h	2010-09-30 14:19:43.000000000 -0500
+@@ -62,14 +62,6 @@
+ #ifdef LIBCFS_DEBUG
+ 
+ /*
+- * When this is on, LASSERT macro includes check for assignment used instead
+- * of equality check, but doesn't have unlikely(). Turn this on from time to
+- * time to make test-builds. This shouldn't be on for production release.
+- */
+-#define LASSERT_CHECKED (0)
+-
+-#if LASSERT_CHECKED
+-/*
+  * Assertion.
+  *
+  * Strange construction with empty "then" clause is used to trigger compiler
+@@ -78,53 +70,33 @@
+  * "warning: suggest parentheses around assignment used as truth value"
+  *
+  * requires -Wall. Unfortunately this rules out use of likely/unlikely.
++ *
++ * When this is on, LASSERT macro includes check for assignment used instead
++ * of equality check, but doesn't have unlikely(). Turn this on from time to
++ * time to make test-builds. This shouldn't be on for production release.
+  */
+-#define LASSERT(cond)                                           \
+-({                                                              \
+-        if (cond)                                               \
+-                ;                                               \
+-        else                                                    \
+-                libcfs_assertion_failed( #cond , __FILE__,      \
+-                        __FUNCTION__, __LINE__);                \
+-})
+-
+-#define LASSERTF(cond, fmt, a...)                                       \
+-({                                                                      \
+-         if (cond)                                                      \
+-                 ;                                                      \
+-         else {                                                         \
+-                 libcfs_debug_msg(NULL, DEBUG_SUBSYSTEM, D_EMERG,       \
+-                                  __FILE__, __FUNCTION__,__LINE__,      \
+-                                  "ASSERTION(" #cond ") failed: " fmt,  \
+-                                  ## a);                                \
+-                 LBUG();                                                \
+-         }                                                              \
+-})
+-
+-/* LASSERT_CHECKED */
++#if 0
++#define LASSERT_CHECK(cond) if (cond) /* OK. */; else
+ #else
++#define LASSERT_CHECK(cond) if (unlikely(!(cond)))
++#endif
+ 
+ #define LASSERT(cond)                                           \
+ ({                                                              \
+-        if (unlikely(!(cond)))                                  \
+-                libcfs_assertion_failed(#cond , __FILE__,       \
+-                        __FUNCTION__, __LINE__);                \
++        LASSERT_CHECK(cond) {                                   \
++                CEMERG("ASSERTION(%s) failed\n", #cond);        \
++                LBUG();                                         \
++        }                                                       \
+ })
+ 
+-#define LASSERTF(cond, fmt, a...)                                       \
+-({                                                                      \
+-        if (unlikely(!(cond))) {                                        \
+-                libcfs_debug_msg(NULL, DEBUG_SUBSYSTEM, D_EMERG,        \
+-                                 __FILE__, __FUNCTION__,__LINE__,       \
+-                                 "ASSERTION(" #cond ") failed: " fmt,   \
+-                                 ## a);                                 \
+-                LBUG();                                                 \
+-        }                                                               \
++#define LASSERTF(cond, fmt, args...)                                 \
++({                                                                   \
++        LASSERT_CHECK(cond) {                                        \
++                CEMERG("ASSERTION(%s) failed: " fmt, #cond, ##args); \
++                LBUG();                                              \
++        }                                                            \
+ })
+ 
+-/* LASSERT_CHECKED */
+-#endif
+-
+ /* LIBCFS_DEBUG */
+ #else
+ #define LASSERT(e) ((void)(0))
+@@ -136,7 +108,11 @@
+ void lbug_with_loc(const char *file, const char *func, const int line)
+         __attribute__((noreturn));
+ 
+-#define LBUG() lbug_with_loc(__FILE__, __FUNCTION__, __LINE__)
++#define LBUG()                                                    \
++do {                                                              \
++        CEMERG("LBUG()\n");                                       \
++        lbug_with_loc(__FILE__, __FUNCTION__, __LINE__);          \
++} while (0)
+ 
+ extern atomic_t libcfs_kmemory;
+ /*
+diff -X dontdiff -uprN 0/lnet/include/libcfs/libcfs.h 1/lnet/include/libcfs/libcfs.h
+--- 0/lnet/include/libcfs/libcfs.h	2010-07-23 18:26:03.000000000 -0500
++++ 1/lnet/include/libcfs/libcfs.h	2010-09-30 14:13:31.000000000 -0500
+@@ -216,31 +216,77 @@ typedef struct {
+         cfs_duration_t  cdls_delay;
+ } cfs_debug_limit_state_t;
+ 
+-/* Controlled via configure key */
+-/* #define CDEBUG_ENABLED */
++void libcfs_debug_msg(cfs_debug_limit_state_t *cdls, int subsys, int mask,
++                      const char *fmt, ...)
++        __attribute__((format (printf, 4, 5)));
++
++void libcfs_debug_msg2(cfs_debug_limit_state_t *cdls, int subsys, int mask,
++                       const char *fmt1, va_list args1, const char *fmt2, ...)
++        __attribute__ ((format (printf, 6, 7)));
++
++static inline const char *cfs_debug_prio(int mask)
++{
++#if defined(__KERNEL__) && defined(__linux__)
++        if (mask & D_EMERG)
++                return KERN_EMERG;
++        else if (mask & D_ERROR)
++                return KERN_ERR;
++        else if (mask & D_WARNING)
++                return KERN_WARNING;
++        else if (mask & D_INFO)
++                return KERN_INFO;
++        else
++                return KERN_DEBUG;
++#else
++        return "";
++#endif
++}
++
++static inline int cfs_current_pid(void)
++{
++#if defined(__KERNEL__) && defined(__linux__)
++        return current->pid;
++#else
++        return 0;
++#endif
++}
++
++__attribute__((pure))
++static inline const char *cfs_basename(const char *path)
++{
++        const char *slash = strrchr(path, '/');
++        if (slash != NULL)
++                return slash + 1;
++        return path;
++}
++
++#define CFS_DEBUG_MASK(mask)                                            \
++        (((mask) & D_CANTMASK) != 0 ||                                  \
++         ((libcfs_debug & (mask)) != 0 &&                               \
++          (libcfs_subsystem_debug & DEBUG_SUBSYSTEM) != 0))
++
++#define CFS_DEBUG_HDR_FMT "%sLustre: %d:(%s:%d:%s()) "
++
++#define CFS_DEBUG_ARGS(cdls, mask, fmt, args...)                        \
++        cdls, DEBUG_SUBSYSTEM, mask, CFS_DEBUG_HDR_FMT fmt,             \
++        cfs_debug_prio(mask), cfs_current_pid(),                        \
++        cfs_basename(__FILE__),  __LINE__, __FUNCTION__, ##args
+ 
+ #if defined(__KERNEL__) || (defined(__arch_lib__) && !defined(LUSTRE_UTILS))
+ 
+ #ifdef CDEBUG_ENABLED
+-#define __CDEBUG(cdls, mask, format, a...)                              \
++#define __CDEBUG(cdls, mask, fmt, args...)                              \
+ do {                                                                    \
+-        CHECK_STACK();                                                  \
+-                                                                        \
+-        if (((mask) & D_CANTMASK) != 0 ||                               \
+-            ((libcfs_debug & (mask)) != 0 &&                            \
+-             (libcfs_subsystem_debug & DEBUG_SUBSYSTEM) != 0))          \
+-                libcfs_debug_msg(cdls, DEBUG_SUBSYSTEM, mask,           \
+-                                 __FILE__, __FUNCTION__, __LINE__,      \
+-                                 format, ## a);                         \
++        if (CFS_DEBUG_MASK((mask)))                                     \
++                libcfs_debug_msg(CFS_DEBUG_ARGS(cdls, (mask), fmt, ##args)); \
+ } while (0)
+ 
+ #define CDEBUG(mask, format, a...) __CDEBUG(NULL, mask, format, ## a)
+ 
+-#define CDEBUG_LIMIT(mask, format, a...)        \
+-do {                                            \
+-        static cfs_debug_limit_state_t cdls;    \
+-                                                \
+-        __CDEBUG(&cdls, mask, format, ## a);    \
++#define CDEBUG_LIMIT(mask, format, a...)      \
++do {                                          \
++        static cfs_debug_limit_state_t _cdls; \
++        __CDEBUG(&_cdls, mask, format, ## a); \
+ } while (0)
+ 
+ #else /* CDEBUG_ENABLED */
+@@ -499,76 +545,6 @@ static inline long cfs_timeval_sub(struc
+         return r;
+ }
+ 
+-#define CFS_RATELIMIT(seconds)                                  \
+-({                                                              \
+-        /*                                                      \
+-         * XXX nikita: non-portable initializer                 \
+-         */                                                     \
+-        static time_t __next_message = 0;                       \
+-        int result;                                             \
+-                                                                \
+-        if (cfs_time_after(cfs_time_current(), __next_message)) \
+-                result = 1;                                     \
+-        else {                                                  \
+-                __next_message = cfs_time_shift(seconds);       \
+-                result = 0;                                     \
+-        }                                                       \
+-        result;                                                 \
+-})
+-
+-struct libcfs_debug_msg_data {
+-        cfs_debug_limit_state_t *msg_cdls;
+-        int                      msg_subsys;
+-        const char              *msg_file;
+-        const char              *msg_fn;
+-        int                      msg_line;
+-};
+-
+-#define DEBUG_MSG_DATA_INIT(cdls, subsystem, file, func, ln ) { \
+-        .msg_cdls           = (cdls),       \
+-        .msg_subsys         = (subsystem),  \
+-        .msg_file           = (file),       \
+-        .msg_fn             = (func),       \
+-        .msg_line           = (ln)          \
+-    }
+-
+-
+-extern int libcfs_debug_vmsg2(cfs_debug_limit_state_t *cdls,
+-                              int subsys, int mask,
+-                              const char *file, const char *fn, const int line,
+-                              const char *format1, va_list args,
+-                              const char *format2, ...)
+-        __attribute__ ((format (printf, 9, 10)));
+-
+-#define libcfs_debug_vmsg(cdls, subsys, mask, file, fn, line, format, args)   \
+-    libcfs_debug_vmsg2(cdls, subsys, mask, file, fn,line,format,args,NULL,NULL)
+-
+-#define libcfs_debug_msg(cdls, subsys, mask, file, fn, line, format, a...)    \
+-    libcfs_debug_vmsg2(cdls, subsys, mask, file, fn,line,NULL,NULL,format, ##a)
+-
+-#define cdebug_va(cdls, mask, file, func, line, fmt, args)      do {          \
+-        CHECK_STACK();                                                        \
+-                                                                              \
+-        if (((mask) & D_CANTMASK) != 0 ||                                     \
+-            ((libcfs_debug & (mask)) != 0 &&                                  \
+-             (libcfs_subsystem_debug & DEBUG_SUBSYSTEM) != 0))                \
+-                libcfs_debug_vmsg(cdls, DEBUG_SUBSYSTEM, (mask),              \
+-                                  (file), (func), (line), fmt, args);         \
+-} while(0)
+-
+-#define cdebug(cdls, mask, file, func, line, fmt, a...) do {                  \
+-        CHECK_STACK();                                                        \
+-                                                                              \
+-        if (((mask) & D_CANTMASK) != 0 ||                                     \
+-            ((libcfs_debug & (mask)) != 0 &&                                  \
+-             (libcfs_subsystem_debug & DEBUG_SUBSYSTEM) != 0))                \
+-                libcfs_debug_msg(cdls, DEBUG_SUBSYSTEM, (mask),               \
+-                                 (file), (func), (line), fmt, ## a);          \
+-} while(0)
+-
+-extern void libcfs_assertion_failed(const char *expr, const char *file,
+-                                    const char *fn, const int line);
+-
+ /* one more external symbol that tracefile provides: */
+ extern int trace_copyout_string(char *usr_buffer, int usr_buffer_nob,
+                                 const char *knl_buffer, char *append);
+diff -X dontdiff -uprN 0/lnet/include/libcfs/linux/libcfs.h 1/lnet/include/libcfs/linux/libcfs.h
+--- 0/lnet/include/libcfs/linux/libcfs.h	2010-07-23 18:26:03.000000000 -0500
++++ 1/lnet/include/libcfs/linux/libcfs.h	2010-09-30 14:13:31.000000000 -0500
+@@ -138,36 +138,6 @@ struct ptldebug_header {
+ 
+ #define LUSTRE_TRACE_SIZE (THREAD_SIZE >> 5)
+ 
+-#if defined(__KERNEL__) && !defined(__x86_64__)
+-# ifdef  __ia64__
+-#  define CDEBUG_STACK() (THREAD_SIZE -                                 \
+-                          ((unsigned long)__builtin_dwarf_cfa() &       \
+-                           (THREAD_SIZE - 1)))
+-# else
+-#  define CDEBUG_STACK() (THREAD_SIZE -                                 \
+-                          ((unsigned long)__builtin_frame_address(0) &  \
+-                           (THREAD_SIZE - 1)))
+-# endif /* __ia64__ */
+-
+-#define __CHECK_STACK(file, func, line)                                 \
+-do {                                                                    \
+-        unsigned long _stack = CDEBUG_STACK();                          \
+-                                                                        \
+-        if (_stack > 3*THREAD_SIZE/4 && _stack > libcfs_stack) {        \
+-                libcfs_stack = _stack;                                  \
+-                libcfs_debug_msg(NULL, DEBUG_SUBSYSTEM, D_WARNING,      \
+-                                 file, func, line,                      \
+-                                 "maximum lustre stack %lu\n", _stack); \
+-              /*panic("LBUG");*/                                        \
+-        }                                                               \
+-} while (0)
+-#define CHECK_STACK()     __CHECK_STACK(__FILE__, __func__, __LINE__)
+-#else /* !__KERNEL__ */
+-#define __CHECK_STACK(X, Y, Z) do { } while(0)
+-#define CHECK_STACK() do { } while(0)
+-#define CDEBUG_STACK() (0L)
+-#endif /* __KERNEL__ */
+-
+ /* initial pid  */
+ #define LUSTRE_LNET_PID          12345
+ 
+diff -X dontdiff -uprN 0/lnet/libcfs/debug.c 1/lnet/libcfs/debug.c
+--- 0/lnet/libcfs/debug.c	2010-07-23 18:26:03.000000000 -0500
++++ 1/lnet/libcfs/debug.c	2010-09-30 14:13:31.000000000 -0500
+@@ -751,6 +751,19 @@ void catamount_printline(char *buf, size
+ }
+ #endif
+ 
++void libcfs_debug_msg(cfs_debug_limit_state_t *cdls, int subsys, int mask,
++                      const char *fmt, ...)
++{
++        /* ... */
++}
++
++
++void libcfs_debug_msg2(cfs_debug_limit_state_t *cdls, int subsys, int mask,
++                       const char *fmt1, va_list args1, const char *fmt2, ...)
++{
++        /* ... */
++}
++
+ int
+ libcfs_debug_vmsg2(cfs_debug_limit_state_t *cdls,
+                    int subsys, int mask,
+@@ -864,13 +877,4 @@ out_file:
+         return 0;
+ }
+ 
+-void
+-libcfs_assertion_failed(const char *expr, const char *file, const char *func,
+-                        const int line)
+-{
+-        libcfs_debug_msg(NULL, 0, D_EMERG, file, func, line,
+-                         "ASSERTION(%s) failed\n", expr);
+-        abort();
+-}
+-
+ #endif /* __KERNEL__ */
+diff -X dontdiff -uprN 0/lnet/libcfs/linux/linux-debug.c 1/lnet/libcfs/linux/linux-debug.c
+--- 0/lnet/libcfs/linux/linux-debug.c	2010-07-23 18:26:03.000000000 -0500
++++ 1/lnet/libcfs/linux/linux-debug.c	2010-09-30 14:13:31.000000000 -0500
+@@ -185,7 +185,6 @@ void lbug_with_loc(const char *file, con
+ void lbug_with_loc(const char *file, const char *func, const int line)
+ {
+         libcfs_catastrophe = 1;
+-        libcfs_debug_msg(NULL, 0, D_EMERG, file, func, line, "LBUG\n");
+ 
+         if (in_interrupt()) {
+                 panic("LBUG in interrupt.\n");
+diff -X dontdiff -uprN 0/lnet/libcfs/tracefile.c 1/lnet/libcfs/tracefile.c
+--- 0/lnet/libcfs/tracefile.c	2010-07-23 18:26:03.000000000 -0500
++++ 1/lnet/libcfs/tracefile.c	2010-09-30 16:52:12.000000000 -0500
+@@ -236,48 +236,41 @@ static struct trace_page *trace_get_tage
+         return tage;
+ }
+ 
+-int libcfs_debug_vmsg2(cfs_debug_limit_state_t *cdls, int subsys, int mask,
+-                       const char *file, const char *fn, const int line,
+-                       const char *format1, va_list args,
+-                       const char *format2, ...)
++static void trace_msg2(int subsys, int mask,
++                       const char *file, int line, const char *func,
++                       const char *fmt1, va_list args1,
++                       const char *fmt2, va_list args2)
+ {
+         struct trace_cpu_data   *tcd = NULL;
+         struct ptldebug_header   header;
+-        struct trace_page       *tage;
++        struct trace_page       *tage = NULL;
+         /* string_buf is used only if tcd != NULL, and is always set then */
+         char                    *string_buf = NULL;
+         char                    *debug_buf;
+         int                      known_size;
+         int                      needed = 85; /* average message length */
+         int                      max_nob;
+-        va_list                  ap;
+         int                      depth;
+         int                      i;
+         int                      remain;
+ 
+-        if (strchr(file, '/'))
+-                file = strrchr(file, '/') + 1;
+-
+         tcd = trace_get_tcd();
+ 
+         /* fs_trace_get_tcd() grabs a lock, which disables preemption and
+          * pins us to a particular CPU.  This avoids an smp_processor_id()
+          * warning on Linux when debugging is enabled. */
+-        set_ptldebug_header(&header, subsys, mask, line, CDEBUG_STACK());
++        set_ptldebug_header(&header, subsys, mask, line, 0);
+ 
+         if (tcd == NULL)                /* arch may not log in IRQ context */
+-                goto console;
++                return;
+ 
+-        if (tcd->tcd_shutting_down) {
+-                trace_put_tcd(tcd);
+-                tcd = NULL;
+-                goto console;
+-        }
++        if (tcd->tcd_shutting_down)
++                goto out;
+ 
+         depth = __current_nesting_level();
+         known_size = strlen(file) + 1 + depth;
+-        if (fn)
+-                known_size += strlen(fn) + 1;
++        if (func)
++                known_size += strlen(func) + 1;
+ 
+         if (libcfs_debug_binary)
+                 known_size += sizeof(header);
+@@ -287,53 +280,47 @@ int libcfs_debug_vmsg2(cfs_debug_limit_s
+          * _without_ terminating NULL.
+          * if needed is to small for this format.
+          */
+-        for (i=0;i<2;i++) {
++        for (i = 0; i < 2; i++) {
+                 tage = trace_get_tage(tcd, needed + known_size + 1);
+-                if (tage == NULL) {
+-                        if (needed + known_size > CFS_PAGE_SIZE)
+-                                mask |= D_ERROR;
+-
+-                        trace_put_tcd(tcd);
+-                        tcd = NULL;
+-                        goto console;
+-                }
++                if (tage == NULL)
++                        goto out;
+ 
+                 string_buf = (char *)cfs_page_address(tage->page)+tage->used+known_size;
+ 
+                 max_nob = CFS_PAGE_SIZE - tage->used - known_size;
+                 if (max_nob <= 0) {
+                         printk(KERN_EMERG "negative max_nob: %i\n", max_nob);
+-                        mask |= D_ERROR;
+-                        trace_put_tcd(tcd);
+-                        tcd = NULL;
+-                        goto console;
++                        goto out;
+                 }
+ 
+                 needed = 0;
+-                if (format1) {
+-                        va_copy(ap, args);
+-                        needed = vsnprintf(string_buf, max_nob, format1, ap);
+-                        va_end(ap);
++                if (fmt1) {
++                        va_list args;
++                        va_copy(args, args1);
++                        needed = vsnprintf(string_buf, max_nob, fmt1, args);
++                        va_end(args);
+                 }
+ 
+-                if (format2) {
++                if (fmt2) {
++                        va_list args;
++
+                         remain = max_nob - needed;
+                         if (remain < 0)
+                                 remain = 0;
+ 
+-                        va_start(ap, format2);
++                        va_copy(args, args2);
+                         needed += vsnprintf(string_buf + needed, remain,
+-                                            format2, ap);
+-                        va_end(ap);
++                                            fmt2, args);
++                        va_end(args);
+                 }
+ 
+                 if (needed < max_nob) /* well. printing ok.. */
+                         break;
+         }
+ 
+-        if (*(string_buf+needed-1) != '\n')
++        if (*(string_buf + needed - 1) != '\n')
+                 printk(KERN_INFO "format at %s:%d:%s doesn't end in newline\n",
+-                       file, line, fn);
++                       file, line, func);
+ 
+         header.ph_len = known_size + needed;
+         debug_buf = (char *)cfs_page_address(tage->page) + tage->used;
+@@ -347,17 +334,17 @@ int libcfs_debug_vmsg2(cfs_debug_limit_s
+         /* indent message according to the nesting level */
+         while (depth-- > 0) {
+                 *(debug_buf++) = '.';
+-                ++ tage->used;
++                ++tage->used;
+         }
+ 
+         strcpy(debug_buf, file);
+         tage->used += strlen(file) + 1;
+         debug_buf += strlen(file) + 1;
+ 
+-        if (fn) {
+-                strcpy(debug_buf, fn);
+-                tage->used += strlen(fn) + 1;
+-                debug_buf += strlen(fn) + 1;
++        if (func) {
++                strcpy(debug_buf, func);
++                tage->used += strlen(func) + 1;
++                debug_buf += strlen(func) + 1;
+         }
+ 
+         __LASSERT(debug_buf == string_buf);
+@@ -365,96 +352,129 @@ int libcfs_debug_vmsg2(cfs_debug_limit_s
+         tage->used += needed;
+         __LASSERT (tage->used <= CFS_PAGE_SIZE);
+ 
+-console:
+-        if ((mask & libcfs_printk) == 0) {
+-                /* no console output requested */
+-                if (tcd != NULL)
+-                        trace_put_tcd(tcd);
+-                return 1;
+-        }
+-
+-        if (cdls != NULL) {
+-                if (libcfs_console_ratelimit &&
+-                    cdls->cdls_next != 0 &&     /* not first time ever */
+-                    !cfs_time_after(cfs_time_current(), cdls->cdls_next)) {
+-                        /* skipping a console message */
+-                        cdls->cdls_count++;
+-                        if (tcd != NULL)
+-                                trace_put_tcd(tcd);
+-                        return 1;
+-                }
+-
+-                if (cfs_time_after(cfs_time_current(), cdls->cdls_next +
+-                                                       libcfs_console_max_delay
+-                                                       + cfs_time_seconds(10))) {
+-                        /* last timeout was a long time ago */
+-                        cdls->cdls_delay /= libcfs_console_backoff * 4;
+-                } else {
+-                        cdls->cdls_delay *= libcfs_console_backoff;
+-
+-                        if (cdls->cdls_delay < libcfs_console_min_delay)
+-                                cdls->cdls_delay = libcfs_console_min_delay;
+-                        else if (cdls->cdls_delay > libcfs_console_max_delay)
+-                                cdls->cdls_delay = libcfs_console_max_delay;
+-                }
++ out:
++        if (tcd != NULL)
++                trace_put_tcd(tcd);
++}
+ 
+-                /* ensure cdls_next is never zero after it's been seen */
+-                cdls->cdls_next = (cfs_time_current() + cdls->cdls_delay) | 1;
+-        }
++static int cfs_debug_limit(cfs_debug_limit_state_t *cdls)
++{
++        int count;
+ 
+-        if (tcd != NULL) {
+-                print_to_console(&header, mask, string_buf, needed, file, fn);
+-                trace_put_tcd(tcd);
+-        } else {
+-                string_buf = trace_get_console_buffer();
++        if (cdls == NULL)
++                return 0;
+ 
+-                needed = 0;
+-                if (format1 != NULL) {
+-                        va_copy(ap, args);
+-                        needed = vsnprintf(string_buf, TRACE_CONSOLE_BUFFER_SIZE, format1, ap);
+-                        va_end(ap);
+-                }
+-                if (format2 != NULL) {
+-                        remain = TRACE_CONSOLE_BUFFER_SIZE - needed;
+-                        if (remain > 0) {
+-                                va_start(ap, format2);
+-                                needed += vsnprintf(string_buf+needed, remain, format2, ap);
+-                                va_end(ap);
+-                        }
+-                }
+-                print_to_console(&header, mask,
+-                                 string_buf, needed, file, fn);
++        if (libcfs_console_ratelimit &&
++            cdls->cdls_next != 0 && /* not first time ever */
++            !cfs_time_after(cfs_time_current(), cdls->cdls_next)) {
++                /* skipping a console message */
++                cdls->cdls_count++;
++                return -1;
++        }
++
++        if (cfs_time_after(cfs_time_current(),
++                           cdls->cdls_next
++                           + libcfs_console_max_delay
++                           + cfs_time_seconds(10))) {
++                /* last timeout was a long time ago */
++                cdls->cdls_delay /= libcfs_console_backoff * 4;
++        } else {
++                cdls->cdls_delay *= libcfs_console_backoff;
+ 
+-                trace_put_console_buffer(string_buf);
++                if (cdls->cdls_delay < libcfs_console_min_delay)
++                        cdls->cdls_delay = libcfs_console_min_delay;
++                else if (cdls->cdls_delay > libcfs_console_max_delay)
++                        cdls->cdls_delay = libcfs_console_max_delay;
+         }
+ 
+-        if (cdls != NULL && cdls->cdls_count != 0) {
+-                string_buf = trace_get_console_buffer();
++        /* ensure cdls_next is never zero after it's been seen */
++        cdls->cdls_next = (cfs_time_current() + cdls->cdls_delay) | 1;
++        count = cdls->cdls_count;
++        cdls->cdls_count = 0;
+ 
+-                needed = snprintf(string_buf, TRACE_CONSOLE_BUFFER_SIZE,
+-                         "Skipped %d previous similar message%s\n",
+-                         cdls->cdls_count, (cdls->cdls_count > 1) ? "s" : "");
++        return count;
++}
+ 
+-                print_to_console(&header, mask,
+-                                 string_buf, needed, file, fn);
++void libcfs_debug_msg(cfs_debug_limit_state_t *cdls, int subsys, int mask,
++                      const char *fmt, ...)
++{
++        va_list args;
+ 
+-                trace_put_console_buffer(string_buf);
+-                cdls->cdls_count = 0;
+-        }
++        va_start(args, fmt);
++        libcfs_debug_msg2(cdls, subsys, mask, fmt, args, NULL);
++        va_end(args);
++}
++EXPORT_SYMBOL(libcfs_debug_msg);
+ 
+-        return 0;
++/* MOVEME */
++#define CONFIG_VPRINTK2
++/* MOVEME */
++static inline void cfs_vprintk2(const char *fmt1, va_list args1, const char *fmt2, va_list args2)
++{
++#if defined(CONFIG_VPRINTK2)
++
++        int vprintk2(const char *fmt1, va_list args1, const char *fmt2, va_list args2);
++        vprintk2(fmt1, args1, fmt2, args2);
++
++#elif defined(CONFIG_VPRINTK2_MAYBE)
++
++        int vprintk2(const char *fmt1, va_list args1, const char *fmt2, va_list args2)
++                __attribute__((weak));
++
++        if (vprintk2 == NULL) {
++                vprintk(fmt1, args1);
++                vprintk(fmt2, args2);
++        } else {
++                vprintk2(fmt1, args1, fmt2, args2);
++        }
++#else
++        vprintk(fmt1, args1);
++        vprintk(fmt2, args2);
++#endif
+ }
+-EXPORT_SYMBOL(libcfs_debug_vmsg2);
+ 
+-void
+-libcfs_assertion_failed(const char *expr, const char *file,
+-                        const char *func, const int line)
++void libcfs_debug_msg2(cfs_debug_limit_state_t *cdls, int subsys, int mask,
++                       const char *fmt1, va_list args1, const char *fmt2, ...)
+ {
+-        libcfs_debug_msg(NULL, 0, D_EMERG, file, func, line,
+-                         "ASSERTION(%s) failed\n", expr);
+-        lbug_with_loc(file, func, line);
++        va_list trace_args1, args2;
++        const char *trace_fmt1, *prio, *file, *func;
++        int pid, line, count;
++
++        trace_fmt1 = fmt1 + strlen(CFS_DEBUG_HDR_FMT);
++
++        va_copy(trace_args1, args1);
++        va_start(args2, fmt2);
++
++        prio = va_arg(trace_args1, char *);
++        pid = va_arg(trace_args1, int);
++        file = va_arg(trace_args1, char *);
++        line = va_arg(trace_args1, int);
++        func = va_arg(trace_args1, char *);
++
++        trace_msg2(subsys, mask, file, line, func,
++                   trace_fmt1, trace_args1, fmt2, args2);
++        va_end(args2);
++        va_end(trace_args1);
++
++        if ((mask & libcfs_printk) == 0)
++                return;
++
++        if ((count = cfs_debug_limit(cdls)) < 0)
++                return;
++
++        if (fmt2 == NULL) {
++                vprintk(fmt1, args1);
++        } else {
++                va_start(args2, fmt2);
++                cfs_vprintk2(fmt1, args1, fmt2, args2);
++                va_end(args2);
++        }
++
++        if (count > 0)
++                printk("%sLustre: %d:(%s:%d:%s()) Skipped %d previous similar message%s\n",
++                       prio, pid, file, line, func, count, count > 1 ? "s" : "");
+ }
+-EXPORT_SYMBOL(libcfs_assertion_failed);
++EXPORT_SYMBOL(libcfs_debug_msg2);
+ 
+ void
+ trace_assertion_failed(const char *str,
+@@ -466,8 +486,7 @@ trace_assertion_failed(const char *str,
+         libcfs_catastrophe = 1;
+         mb();
+ 
+-        set_ptldebug_header(&hdr, DEBUG_SUBSYSTEM, D_EMERG, line,
+-                            CDEBUG_STACK());
++        set_ptldebug_header(&hdr, DEBUG_SUBSYSTEM, D_EMERG, line, 0);
+ 
+         print_to_console(&hdr, D_EMERG, str, strlen(str), file, fn);
+ 
+diff -X dontdiff -uprN 0/lnet/libcfs/user-prim.c 1/lnet/libcfs/user-prim.c
+--- 0/lnet/libcfs/user-prim.c	2010-07-23 18:26:03.000000000 -0500
++++ 1/lnet/libcfs/user-prim.c	2010-09-30 14:13:31.000000000 -0500
+@@ -397,7 +397,7 @@ void *cfs_stack_trace_frame(struct cfs_s
+ void lbug_with_loc(const char *file, const char *func, const int line)
+ {
+         /* No libcfs_catastrophe in userspace! */
+-        libcfs_debug_msg(NULL, 0, D_EMERG, file, func, line, "LBUG\n");
++        /* libcfs_debug_msg(NULL, 0, D_EMERG, file, func, line, "LBUG\n"); */
+         abort();
+ }
+ 
+diff -X dontdiff -uprN 0/lustre/include/lustre_dlm.h 1/lustre/include/lustre_dlm.h
+--- 0/lustre/include/lustre_dlm.h	2010-07-23 18:26:03.000000000 -0500
++++ 1/lustre/include/lustre_dlm.h	2010-09-30 14:13:31.000000000 -0500
+@@ -636,43 +636,28 @@ extern char *ldlm_lockname[];
+ extern char *ldlm_typename[];
+ extern char *ldlm_it2str(int it);
+ 
+-#define ldlm_lock_debug(cdls, level, lock, file, func, line, fmt, a...) do {  \
+-        CHECK_STACK();                                                  \
+-                                                                        \
+-        if (((level) & D_CANTMASK) != 0 ||                              \
+-            ((libcfs_debug & (level)) != 0 &&                           \
+-             (libcfs_subsystem_debug & DEBUG_SUBSYSTEM) != 0)) {        \
+-                static struct libcfs_debug_msg_data _ldlm_dbg_data =    \
+-                DEBUG_MSG_DATA_INIT(cdls, DEBUG_SUBSYSTEM,              \
+-                                    file, func, line);                  \
+-                _ldlm_lock_debug(lock, level, &_ldlm_dbg_data, fmt,     \
+-                                 ##a );                                 \
+-        }                                                               \
++void ldlm_debug_msg(struct ldlm_lock *lock,
++                    cfs_debug_limit_state_t *cdls,
++                    int subsys, int mask,
++                    const char *fmt, ...)
++        __attribute__ ((format (printf, 5, 6)));
++
++#define LDLM_DEBUG_MSG(lock, cdls, mask, fmt, args...)                  \
++do {                                                                    \
++        if (CFS_DEBUG_MASK((mask)))                                     \
++                ldlm_debug_msg(lock, CFS_DEBUG_ARGS(cdls, mask, "### " fmt, ##args)); \
+ } while(0)
+ 
+-void _ldlm_lock_debug(struct ldlm_lock *lock, __u32 mask,
+-                      struct libcfs_debug_msg_data *data, const char *fmt,
+-                      ...)
+-        __attribute__ ((format (printf, 4, 5)));
+-
+-#define LDLM_DEBUG_LIMIT(mask, lock, fmt, a...) do {                     \
+-        static cfs_debug_limit_state_t _ldlm_cdls;                       \
+-        ldlm_lock_debug(&_ldlm_cdls, mask, lock,                         \
+-                        __FILE__, __FUNCTION__, __LINE__,                \
+-                        "### " fmt , ##a);                               \
++#define LDLM_DEBUG_LIMIT(mask, lock, fmt, args...)               \
++do {                                                             \
++        static cfs_debug_limit_state_t _ldlm_cdls;               \
++        LDLM_DEBUG_MSG(lock, &_ldlm_cdls, mask, fmt, ##args);    \
+ } while (0)
+ 
+-#define LDLM_ERROR(lock, fmt, a...) LDLM_DEBUG_LIMIT(D_ERROR, lock, fmt, ## a)
+-#define LDLM_WARN(lock, fmt, a...)  LDLM_DEBUG_LIMIT(D_WARNING, lock, fmt, ## a)
+-
+-#define LDLM_DEBUG(lock, fmt, a...)   do {                              \
+-        ldlm_lock_debug(NULL, D_DLMTRACE, lock,                         \
+-                        __FILE__, __FUNCTION__, __LINE__,               \
+-                         "### " fmt , ##a);                             \
+-} while (0)
+-
+-#define LDLM_DEBUG_NOLOCK(format, a...)                                 \
+-        CDEBUG(D_DLMTRACE, "### " format "\n" , ##a)
++#define LDLM_ERROR(lock, fmt, args...) LDLM_DEBUG_LIMIT(D_ERROR, lock, fmt, ##args)
++#define LDLM_WARN(lock, fmt, args...) LDLM_DEBUG_LIMIT(D_WARNING, lock, fmt, ##args)
++#define LDLM_DEBUG(lock, fmt, args...) LDLM_DEBUG_MSG(lock, NULL, D_DLMTRACE, fmt, ##args)
++#define LDLM_DEBUG_NOLOCK(fmt, args...) CDEBUG(D_DLMTRACE, "### " fmt "\n" , ##args)
+ 
+ typedef int (*ldlm_processing_policy)(struct ldlm_lock *lock, int *flags,
+                                       int first_enq, ldlm_error_t *err,
+diff -X dontdiff -uprN 0/lustre/include/lustre_net.h 1/lustre/include/lustre_net.h
+--- 0/lustre/include/lustre_net.h	2010-07-23 18:26:03.000000000 -0500
++++ 1/lustre/include/lustre_net.h	2010-09-30 17:16:28.000000000 -0500
+@@ -484,47 +484,25 @@ ptlrpc_rqphase2str(struct ptlrpc_request
+         return ptlrpc_phase2str(req->rq_phase);
+ }
+ 
+-/* Spare the preprocessor, spoil the bugs. */
+-#define FLAG(field, str) (field ? str : "")
+-
+-#define DEBUG_REQ_FLAGS(req)                                                  \
+-        ptlrpc_rqphase2str(req),                                              \
+-        FLAG(req->rq_intr, "I"), FLAG(req->rq_replied, "R"),                  \
+-        FLAG(req->rq_err, "E"),                                               \
+-        FLAG(req->rq_timedout, "X") /* eXpired */, FLAG(req->rq_resend, "S"), \
+-        FLAG(req->rq_restart, "T"), FLAG(req->rq_replay, "P"),                \
+-        FLAG(req->rq_no_resend, "N"),                                         \
+-        FLAG(req->rq_waiting, "W"), FLAG(req->rq_hp, "H")
+-
+-#define REQ_FLAGS_FMT "%s:%s%s%s%s%s%s%s%s%s%s"
+-
+-void _debug_req(struct ptlrpc_request *req, __u32 mask,
+-                struct libcfs_debug_msg_data *data, const char *fmt, ...)
+-        __attribute__ ((format (printf, 4, 5)));
+-
+-#define debug_req(cdls, level, req, file, func, line, fmt, a...)              \
+-do {                                                                          \
+-        CHECK_STACK();                                                        \
+-                                                                              \
+-        if (((level) & D_CANTMASK) != 0 ||                                    \
+-            ((libcfs_debug & (level)) != 0 &&                                 \
+-             (libcfs_subsystem_debug & DEBUG_SUBSYSTEM) != 0)) {              \
+-                static struct libcfs_debug_msg_data _req_dbg_data =           \
+-                DEBUG_MSG_DATA_INIT(cdls, DEBUG_SUBSYSTEM, file, func, line); \
+-                _debug_req((req), (level), &_req_dbg_data, fmt, ##a);         \
+-        }                                                                     \
++void debug_req_msg(struct ptlrpc_request *req, cfs_debug_limit_state_t *cdls,
++                   int subsys, int mask, const char *fmt1, ...)
++        __attribute__ ((format (printf, 5, 6)));
++
++#define DEBUG_REQ_MSG(req, cdls, mask, fmt, args...)                    \
++do {                                                                    \
++        if (CFS_DEBUG_MASK((mask)))                                     \
++                debug_req_msg(req, CFS_DEBUG_ARGS(cdls, mask, "@@@ " fmt, ##args)); \
+ } while(0)
+ 
+ /* for most callers (level is a constant) this is resolved at compile time */
+-#define DEBUG_REQ(level, req, fmt, args...)                                   \
+-do {                                                                          \
+-        if ((level) & (D_ERROR | D_WARNING)) {                                \
+-            static cfs_debug_limit_state_t cdls;                              \
+-            debug_req(&cdls, level, req, __FILE__, __func__, __LINE__,        \
+-                      "@@@ "fmt" ", ## args);                                 \
+-        } else                                                                \
+-            debug_req(NULL, level, req, __FILE__, __func__, __LINE__,         \
+-                      "@@@ "fmt" ", ## args);                                 \
++#define DEBUG_REQ(mask, req, fmt, args...)                              \
++do {                                                                    \
++        if ((mask) & (D_ERROR | D_WARNING)) {                           \
++                static cfs_debug_limit_state_t _cdls;                   \
++                DEBUG_REQ_MSG(req, &_cdls, mask, fmt, ##args);          \
++        } else {                                                        \
++                DEBUG_REQ_MSG(req, NULL, mask, fmt, ##args);            \
++        }                                                               \
+ } while (0)
+ 
+ struct ptlrpc_bulk_page {
+diff -X dontdiff -uprN 0/lustre/ldlm/ldlm_lock.c 1/lustre/ldlm/ldlm_lock.c
+--- 0/lustre/ldlm/ldlm_lock.c	2010-07-23 18:26:03.000000000 -0500
++++ 1/lustre/ldlm/ldlm_lock.c	2010-09-30 14:13:31.000000000 -0500
+@@ -1800,126 +1800,118 @@ void ldlm_lock_dump_handle(int level, st
+         LDLM_LOCK_PUT(lock);
+ }
+ 
+-void _ldlm_lock_debug(struct ldlm_lock *lock, __u32 level,
+-                      struct libcfs_debug_msg_data *data, const char *fmt,
+-                      ...)
++void ldlm_debug_msg(struct ldlm_lock *lock, cfs_debug_limit_state_t *cdls,
++                    int subsys, int mask, const char *fmt1, ...)
+ {
+-        va_list args;
+-        cfs_debug_limit_state_t *cdls = data->msg_cdls;
++        va_list args1;
++
++#define _MSG(fmt2, args2...)                                               \
++do {                                                                       \
++        va_start(args1, fmt1);                                             \
++        libcfs_debug_msg2(cdls, subsys, mask, fmt1, args1, fmt2, ##args2); \
++        va_end(args1);                                                     \
++} while (0)
+ 
+-        va_start(args, fmt);
+         if (lock->l_resource == NULL) {
+-                libcfs_debug_vmsg2(cdls, data->msg_subsys, level, data->msg_file,
+-                                   data->msg_fn, data->msg_line, fmt, args,
+-                                   " ns: \?\? lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
+-                                   "res: \?\? rrc=\?\? type: \?\?\? flags: "LPX64" remote: "
+-                                   LPX64" expref: %d pid: %u timeout: %lu\n", lock,
+-                                   lock->l_handle.h_cookie, atomic_read(&lock->l_refc),
+-                                   lock->l_readers, lock->l_writers,
+-                                   ldlm_lockname[lock->l_granted_mode],
+-                                   ldlm_lockname[lock->l_req_mode],
+-                                   lock->l_flags, lock->l_remote_handle.cookie,
+-                                   lock->l_export ?
+-                                        atomic_read(&lock->l_export->exp_refcount) : -99,
+-                                   lock->l_pid, lock->l_callback_timeout);
+-                va_end(args);
++                _MSG(" ns: \?\? lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
++                     "res: \?\? rrc=\?\? type: \?\?\? flags: "LPX64" remote: "
++                     LPX64" expref: %d pid: %u timeout: %lu\n", lock,
++                     lock->l_handle.h_cookie, atomic_read(&lock->l_refc),
++                     lock->l_readers, lock->l_writers,
++                     ldlm_lockname[lock->l_granted_mode],
++                     ldlm_lockname[lock->l_req_mode],
++                     lock->l_flags, lock->l_remote_handle.cookie,
++                     lock->l_export ?
++                     atomic_read(&lock->l_export->exp_refcount) : -99,
++                     lock->l_pid, lock->l_callback_timeout);
+                 return;
+         }
+ 
+         switch (lock->l_resource->lr_type) {
+         case LDLM_EXTENT:
+-                libcfs_debug_vmsg2(cdls, data->msg_subsys, level, data->msg_file,
+-                                   data->msg_fn, data->msg_line, fmt, args,
+-                                   " ns: %s lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
+-                                   "res: "LPU64"/"LPU64" rrc: %d type: %s ["LPU64"->"LPU64
+-                                   "] (req "LPU64"->"LPU64") flags: "LPX64" remote: "LPX64
+-                                    " expref: %d pid: %u timeout %lu\n",
+-                                    lock->l_resource->lr_namespace->ns_name, lock,
+-                                    lock->l_handle.h_cookie, atomic_read(&lock->l_refc),
+-                                    lock->l_readers, lock->l_writers,
+-                                    ldlm_lockname[lock->l_granted_mode],
+-                                    ldlm_lockname[lock->l_req_mode],
+-                                    lock->l_resource->lr_name.name[0],
+-                                    lock->l_resource->lr_name.name[1],
+-                                    atomic_read(&lock->l_resource->lr_refcount),
+-                                    ldlm_typename[lock->l_resource->lr_type],
+-                                    lock->l_policy_data.l_extent.start,
+-                                    lock->l_policy_data.l_extent.end,
+-                                    lock->l_req_extent.start, lock->l_req_extent.end,
+-                                    lock->l_flags, lock->l_remote_handle.cookie,
+-                                    lock->l_export ?
+-                                        atomic_read(&lock->l_export->exp_refcount) : -99,
+-                                    lock->l_pid, lock->l_callback_timeout);
+-                break;
++                _MSG(" ns: %s lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
++                     "res: "LPU64"/"LPU64" rrc: %d type: %s ["LPU64"->"LPU64
++                     "] (req "LPU64"->"LPU64") flags: "LPX64" remote: "LPX64
++                     " expref: %d pid: %u timeout %lu\n",
++                     lock->l_resource->lr_namespace->ns_name, lock,
++                     lock->l_handle.h_cookie, atomic_read(&lock->l_refc),
++                     lock->l_readers, lock->l_writers,
++                     ldlm_lockname[lock->l_granted_mode],
++                     ldlm_lockname[lock->l_req_mode],
++                     lock->l_resource->lr_name.name[0],
++                     lock->l_resource->lr_name.name[1],
++                     atomic_read(&lock->l_resource->lr_refcount),
++                     ldlm_typename[lock->l_resource->lr_type],
++                     lock->l_policy_data.l_extent.start,
++                     lock->l_policy_data.l_extent.end,
++                     lock->l_req_extent.start, lock->l_req_extent.end,
++                     lock->l_flags, lock->l_remote_handle.cookie,
++                     lock->l_export ?
++                     atomic_read(&lock->l_export->exp_refcount) : -99,
++                     lock->l_pid, lock->l_callback_timeout);
++                return;
+         case LDLM_FLOCK:
+-                libcfs_debug_vmsg2(cdls, data->msg_subsys, level, data->msg_file,
+-                                   data->msg_fn, data->msg_line, fmt, args,
+-                                   " ns: %s lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
+-                                   "res: "LPU64"/"LPU64" rrc: %d type: %s pid: %d "
+-                                   "["LPU64"->"LPU64"] flags: "LPX64" remote: "LPX64
+-                                   " expref: %d pid: %u timeout: %lu\n",
+-                                   lock->l_resource->lr_namespace->ns_name, lock,
+-                                   lock->l_handle.h_cookie, atomic_read(&lock->l_refc),
+-                                   lock->l_readers, lock->l_writers,
+-                                   ldlm_lockname[lock->l_granted_mode],
+-                                   ldlm_lockname[lock->l_req_mode],
+-                                   lock->l_resource->lr_name.name[0],
+-                                   lock->l_resource->lr_name.name[1],
+-                                   atomic_read(&lock->l_resource->lr_refcount),
+-                                   ldlm_typename[lock->l_resource->lr_type],
+-                                   lock->l_policy_data.l_flock.pid,
+-                                   lock->l_policy_data.l_flock.start,
+-                                   lock->l_policy_data.l_flock.end,
+-                                   lock->l_flags, lock->l_remote_handle.cookie,
+-                                   lock->l_export ?
+-                                        atomic_read(&lock->l_export->exp_refcount) : -99,
+-                                   lock->l_pid, lock->l_callback_timeout);
+-                break;
++                _MSG(" ns: %s lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
++                     "res: "LPU64"/"LPU64" rrc: %d type: %s pid: %d "
++                     "["LPU64"->"LPU64"] flags: "LPX64" remote: "LPX64
++                     " expref: %d pid: %u timeout: %lu\n",
++                     lock->l_resource->lr_namespace->ns_name, lock,
++                     lock->l_handle.h_cookie, atomic_read(&lock->l_refc),
++                     lock->l_readers, lock->l_writers,
++                     ldlm_lockname[lock->l_granted_mode],
++                     ldlm_lockname[lock->l_req_mode],
++                     lock->l_resource->lr_name.name[0],
++                     lock->l_resource->lr_name.name[1],
++                     atomic_read(&lock->l_resource->lr_refcount),
++                     ldlm_typename[lock->l_resource->lr_type],
++                     lock->l_policy_data.l_flock.pid,
++                     lock->l_policy_data.l_flock.start,
++                     lock->l_policy_data.l_flock.end,
++                     lock->l_flags, lock->l_remote_handle.cookie,
++                     lock->l_export ?
++                     atomic_read(&lock->l_export->exp_refcount) : -99,
++                     lock->l_pid, lock->l_callback_timeout);
++                return;
+         case LDLM_IBITS:
+-                libcfs_debug_vmsg2(cdls, data->msg_subsys, level, data->msg_file,
+-                                   data->msg_fn, data->msg_line, fmt, args,
+-                                   " ns: %s lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
+-                                   "res: "LPU64"/"LPU64" bits "LPX64" rrc: %d type: %s "
+-                                   "flags: "LPX64" remote: "LPX64" expref: %d "
+-                                   "pid: %u timeout: %lu\n",
+-                                   lock->l_resource->lr_namespace->ns_name,
+-                                   lock, lock->l_handle.h_cookie,
+-                                   atomic_read (&lock->l_refc),
+-                                   lock->l_readers, lock->l_writers,
+-                                   ldlm_lockname[lock->l_granted_mode],
+-                                   ldlm_lockname[lock->l_req_mode],
+-                                   lock->l_resource->lr_name.name[0],
+-                                   lock->l_resource->lr_name.name[1],
+-                                   lock->l_policy_data.l_inodebits.bits,
+-                                   atomic_read(&lock->l_resource->lr_refcount),
+-                                   ldlm_typename[lock->l_resource->lr_type],
+-                                   lock->l_flags, lock->l_remote_handle.cookie,
+-                                   lock->l_export ?
+-                                        atomic_read(&lock->l_export->exp_refcount) : -99,
+-                                   lock->l_pid, lock->l_callback_timeout);
+-                break;
++                _MSG(" ns: %s lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
++                     "res: "LPU64"/"LPU64" bits "LPX64" rrc: %d type: %s "
++                     "flags: "LPX64" remote: "LPX64" expref: %d "
++                     "pid: %u timeout: %lu\n",
++                     lock->l_resource->lr_namespace->ns_name,
++                     lock, lock->l_handle.h_cookie,
++                     atomic_read (&lock->l_refc),
++                     lock->l_readers, lock->l_writers,
++                     ldlm_lockname[lock->l_granted_mode],
++                     ldlm_lockname[lock->l_req_mode],
++                     lock->l_resource->lr_name.name[0],
++                     lock->l_resource->lr_name.name[1],
++                     lock->l_policy_data.l_inodebits.bits,
++                     atomic_read(&lock->l_resource->lr_refcount),
++                     ldlm_typename[lock->l_resource->lr_type],
++                     lock->l_flags, lock->l_remote_handle.cookie,
++                     lock->l_export ?
++                     atomic_read(&lock->l_export->exp_refcount) : -99,
++                     lock->l_pid, lock->l_callback_timeout);
++                return;
+         default:
+-                libcfs_debug_vmsg2(cdls, data->msg_subsys, level, data->msg_file,
+-                                   data->msg_fn, data->msg_line, fmt, args,
+-                                   " ns: %s lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
+-                                   "res: "LPU64"/"LPU64" rrc: %d type: %s flags: "LPX64" "
+-                                   "remote: "LPX64" expref: %d pid: %u timeout %lu\n",
+-                                   lock->l_resource->lr_namespace->ns_name,
+-                                   lock, lock->l_handle.h_cookie,
+-                                   atomic_read (&lock->l_refc),
+-                                   lock->l_readers, lock->l_writers,
+-                                   ldlm_lockname[lock->l_granted_mode],
+-                                   ldlm_lockname[lock->l_req_mode],
+-                                   lock->l_resource->lr_name.name[0],
+-                                   lock->l_resource->lr_name.name[1],
+-                                   atomic_read(&lock->l_resource->lr_refcount),
+-                                   ldlm_typename[lock->l_resource->lr_type],
+-                                   lock->l_flags, lock->l_remote_handle.cookie,
+-                                   lock->l_export ?
+-                                         atomic_read(&lock->l_export->exp_refcount) : -99,
+-                                   lock->l_pid, lock->l_callback_timeout);
+-                break;
++                _MSG(" ns: %s lock: %p/"LPX64" lrc: %d/%d,%d mode: %s/%s "
++                     "res: "LPU64"/"LPU64" rrc: %d type: %s flags: "LPX64" "
++                     "remote: "LPX64" expref: %d pid: %u timeout %lu\n",
++                     lock->l_resource->lr_namespace->ns_name,
++                     lock, lock->l_handle.h_cookie,
++                     atomic_read (&lock->l_refc),
++                     lock->l_readers, lock->l_writers,
++                     ldlm_lockname[lock->l_granted_mode],
++                     ldlm_lockname[lock->l_req_mode],
++                     lock->l_resource->lr_name.name[0],
++                     lock->l_resource->lr_name.name[1],
++                     atomic_read(&lock->l_resource->lr_refcount),
++                     ldlm_typename[lock->l_resource->lr_type],
++                     lock->l_flags, lock->l_remote_handle.cookie,
++                     lock->l_export ?
++                     atomic_read(&lock->l_export->exp_refcount) : -99,
++                     lock->l_pid, lock->l_callback_timeout);
++                return;
+         }
+-        va_end(args);
+ }
+-EXPORT_SYMBOL(_ldlm_lock_debug);
++EXPORT_SYMBOL(ldlm_debug_msg);
+diff -X dontdiff -uprN 0/lustre/ptlrpc/pack_generic.c 1/lustre/ptlrpc/pack_generic.c
+--- 0/lustre/ptlrpc/pack_generic.c	2010-07-23 18:26:03.000000000 -0500
++++ 1/lustre/ptlrpc/pack_generic.c	2010-09-30 17:17:50.000000000 -0500
+@@ -2695,11 +2695,24 @@ static inline int rep_ptlrpc_body_swabbe
+         }
+ }
+ 
+-void _debug_req(struct ptlrpc_request *req, __u32 mask,
+-                struct libcfs_debug_msg_data *data, const char *fmt, ... )
++/* Spare the preprocessor, spoil the bugs. */
++#define FLAG(field, str) (field ? str : "")
+ 
++#define DEBUG_REQ_FLAGS(req)                                                  \
++        ptlrpc_rqphase2str(req),                                              \
++        FLAG(req->rq_intr, "I"), FLAG(req->rq_replied, "R"),                  \
++        FLAG(req->rq_err, "E"),                                               \
++        FLAG(req->rq_timedout, "X") /* eXpired */, FLAG(req->rq_resend, "S"), \
++        FLAG(req->rq_restart, "T"), FLAG(req->rq_replay, "P"),                \
++        FLAG(req->rq_no_resend, "N"),                                         \
++        FLAG(req->rq_waiting, "W"), FLAG(req->rq_hp, "H")
++
++#define REQ_FLAGS_FMT "%s:%s%s%s%s%s%s%s%s%s%s"
++
++void debug_req_msg(struct ptlrpc_request *req, cfs_debug_limit_state_t *cdls,
++                   int subsys, int mask, const char *fmt1, ...)
+ {
+-        va_list args;
++        va_list args1;
+         int opc = -1;
+         int req_fl = 0;
+         int rep_fl = 0;
+@@ -2724,9 +2737,8 @@ void _debug_req(struct ptlrpc_request *r
+                 rep_status = lustre_msg_get_status(req->rq_repmsg);
+         }
+ 
+-        va_start(args, fmt);
+-        libcfs_debug_vmsg2(data->msg_cdls, data->msg_subsys, mask,
+-                data->msg_file, data->msg_fn, data->msg_line, fmt, args,
++        va_start(args1, fmt1);
++        libcfs_debug_msg2(cdls, subsys, mask, fmt1, args1,
+                 " req@%p x"LPU64"/t"LPD64" o%d->%s@%s:%d/%d lens %d/%d e %d "
+                 "to %d dl %ld ref %d fl "REQ_FLAGS_FMT"/%x/%x rc %d/%d\n",
+                 req, req->rq_xid, req->rq_transno, opc,
+@@ -2742,8 +2754,6 @@ void _debug_req(struct ptlrpc_request *r
+                 req->rq_early_count, !!req->rq_timeout, req->rq_deadline,
+                 atomic_read(&req->rq_refcount), DEBUG_REQ_FLAGS(req),
+                 req_fl, rep_fl, req->rq_status, rep_status);
+-        va_end(args);
++        va_end(args1);
+ }
+-
+-
+-EXPORT_SYMBOL(_debug_req);
++EXPORT_SYMBOL(debug_req_msg);

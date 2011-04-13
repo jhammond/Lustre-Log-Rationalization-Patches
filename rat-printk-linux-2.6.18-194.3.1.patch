@@ -1,0 +1,584 @@
+--- 0/fs/proc/proc_misc.c	2010-05-12 13:12:40.000000000 -0500
++++ 1/fs/proc/proc_misc.c	2010-10-05 10:56:42.000000000 -0500
+@@ -45,6 +45,7 @@
+ #include <linux/sysrq.h>
+ #include <linux/vmalloc.h>
+ #include <linux/crash_dump.h>
++#include <linux/rat-printk.h>
+ #include <asm/uaccess.h>
+ #include <asm/pgtable.h>
+ #include <asm/io.h>
+@@ -738,4 +739,9 @@ void __init proc_misc_init(void)
+ 	if (entry)
+ 		entry->proc_fops = &proc_sysrq_trigger_operations;
+ #endif
++#ifdef CONFIG_RAT_PRINTK
++	entry = create_proc_entry(CONFIG_RAT_PRINTK_PROC_NAME, S_IRUSR, NULL);
++	if (entry)
++		entry->proc_fops = &proc_rat_printk_operations;
++#endif
+ }
+--- 0/include/linux/rat-printk.h	1969-12-31 18:00:00.000000000 -0600
++++ 1/include/linux/rat-printk.h	2010-10-05 11:22:57.000000000 -0500
+@@ -0,0 +1,25 @@
++#ifndef _LINUX_RAT_PRINTK_H
++#define _LINUX_RAT_PRINTK_H
++#include <stdarg.h>
++#ifdef CONFIG_RAT_PRINTK
++#include <linux/fs.h>
++
++extern struct file_operations proc_rat_printk_operations;
++
++void rat_vprintk2(const char *fmt1, va_list args1, const char *fmt2,
++		  va_list args2);
++
++static inline void rat_vprintk(const char *fmt, va_list args)
++{
++	va_list dummy;
++
++	rat_vprintk2(fmt, args, NULL, dummy);
++}
++#else
++static inline void rat_vprintk(const char *fmt, va_list args)
++{
++}
++static inline void rat_vprintk2(const char *fmt1, va_list args1,
++				const char *fmt2, va_list args2);
++#endif
++#endif
+--- 0/init/Kconfig	2010-05-12 13:13:07.000000000 -0500
++++ 1/init/Kconfig	2010-10-05 11:34:46.000000000 -0500
+@@ -266,6 +266,34 @@ config CC_OPTIMIZE_FOR_SIZE
+ 
+ 	  If unsure, say N.
+ 
++config RAT_PRINTK
++	bool "Enable a rationalized version of printk()"
++	default n
++	depends on PRINTK && PROC_FS
++	help
++		If this option is enabled then kernel messages will be readable
++		in unformatted form from /proc/rat-kmsg (or at
++		"/proc/"CONFIG_RAT_PRINTK_PROC_NAME).  Enabling this option
++		should not disrupt the usual behavior of printk() or vprintk().
++
++		If unsure then say N.
++
++config RAT_PRINTK_PROC_NAME
++	string "Name of the proc entry for reading rat-printk() messages"
++  default "rat-kmsg"
++  depends on RAT_PRINTK
++  
++config RAT_PRINTK_LOG_BUF_SHIFT
++  int "Set rat-printk log buffer size as a power of 2"
++	range 16 24
++	default 20
++	depends on RAT_PRINTK
++
++config RAT_PRINTK_TXT_MAX
++  int "Set maximum length of rat-printk message text"
++	default 1024
++	depends on RAT_PRINTK
++
+ menuconfig EMBEDDED
+ 	bool "Configure standard kernel features (for small systems)"
+ 	help
+--- 0/kernel/Makefile	2010-05-12 13:13:05.000000000 -0500
++++ 1/kernel/Makefile	2010-10-05 10:23:26.000000000 -0500
+@@ -55,6 +55,7 @@ obj-$(CONFIG_TRACEPOINTS) += tracepoint.
+ obj-$(CONFIG_UTRACE) += utrace.o
+ obj-$(CONFIG_PTRACE) += ptrace.o
+ obj-$(CONFIG_MARKERS) += marker.o
++obj-$(CONFIG_RAT_PRINTK) += rat-printk.o
+ 
+ ifneq ($(CONFIG_SCHED_NO_NO_OMIT_FRAME_POINTER),y)
+ # According to Alan Modra <alan@linuxcare.com.au>, the -fno-omit-frame-pointer is
+--- 0/kernel/printk.c	2010-05-12 13:12:45.000000000 -0500
++++ 1/kernel/printk.c	2010-10-05 11:25:18.000000000 -0500
+@@ -33,7 +33,7 @@
+ #include <linux/security.h>
+ #include <linux/bootmem.h>
+ #include <linux/syscalls.h>
+-
++#include <linux/rat-printk.h>
+ #include <asm/uaccess.h>
+ #ifndef __GENKSYMS__
+ #include <linux/kexec.h>
+@@ -545,6 +545,7 @@ asmlinkage int printk(const char *fmt, .
+ 
+ 	return r;
+ }
++EXPORT_SYMBOL(printk);
+ 
+ /* cpu currently holding logbuf_lock */
+ static volatile unsigned int printk_cpu = UINT_MAX;
+@@ -553,7 +554,7 @@ static const char recursion_bug_msg [] =
+ 			KERN_CRIT "BUG: recent printk recursion!\n";
+ static int recursion_bug;
+ 
+-asmlinkage int vprintk(const char *fmt, va_list args)
++asmlinkage int dfl_vprintk(const char *fmt, va_list args)
+ {
+ 	static int log_level_unknown = 1;
+ 	static char printk_buf[1024];
+@@ -696,9 +697,46 @@ out_restore_irqs:
+ 	preempt_enable();
+ 	return printed_len;
+ }
+-EXPORT_SYMBOL(printk);
++
++asmlinkage int vprintk(const char *fmt, va_list args)
++{
++	int r;
++
++#ifdef CONFIG_RAT_PRINTK
++	va_list copy;
++	va_copy(copy, args);
++#endif
++	r = dfl_vprintk(fmt, args);
++#ifdef CONFIG_RAT_PRINTK
++	rat_vprintk(fmt, copy);
++	va_end(copy);
++#endif
++
++	return r;
++}
+ EXPORT_SYMBOL(vprintk);
+ 
++int vprintk2(const char *fmt1, va_list args1, const char *fmt2, va_list args2)
++{
++	int r;
++
++#ifdef CONFIG_RAT_PRINTK
++	va_list copy1, copy2;
++	va_copy(copy1, args1);
++	va_copy(copy2, args2);
++#endif
++	r = dfl_vprintk(fmt1, args1);
++	r += dfl_vprintk(fmt2, args2);
++#ifdef CONFIG_RAT_PRINTK
++	rat_vprintk2(fmt1, copy1, fmt2, copy2);
++	va_end(copy1);
++	va_end(copy2);
++#endif
++
++	return r;
++}
++EXPORT_SYMBOL(vprintk2);
++
+ #else
+ 
+ asmlinkage long sys_syslog(int type, char __user *buf, int len)
+--- 0/kernel/rat-printk.c	1969-12-31 18:00:00.000000000 -0600
++++ 1/kernel/rat-printk.c	2010-10-05 12:59:51.000000000 -0500
+@@ -0,0 +1,410 @@
++#include <stdarg.h>
++#include <linux/types.h>	/* size_t */
++#include <linux/kernel.h>	/* vsnprintf(), INT_MAX */
++#include <linux/fs.h>
++#include <linux/poll.h>
++#include <linux/errno.h>
++#include <linux/ctype.h>
++#include <linux/string.h>
++#include <linux/limits.h>	/* PAGE_SIZE */
++#include <linux/rat-printk.h>
++#include <asm/uaccess.h>
++
++#define RPK_LOG_SIZE (1u << CONFIG_RAT_PRINTK_LOG_BUF_SHIFT)
++#define RPK_LOG_MASK (RPK_LOG_SIZE - 1u)
++#define RPK_LOG(i) (rpk_log[(i) & RPK_LOG_MASK])
++
++/* rpk_lock protects rpk_log, rpk_log_begin, rpk_log_end, and the
++   static buffer msg in rat_vprintk2(). */
++
++static DEFINE_SPINLOCK(rpk_lock);
++static DECLARE_WAIT_QUEUE_HEAD(rpk_wait_queue);
++static volatile unsigned int rpk_lock_cpu = UINT_MAX;
++
++static char rpk_log[RPK_LOG_SIZE];
++static unsigned long rpk_log_begin, rpk_log_end;
++
++static size_t rpk_encode2(char *buf, size_t size,
++			  const char *fmt1, va_list args1,
++			  const char *fmt2, va_list args2);
++
++void rat_vprintk2(const char *fmt1, va_list args1, const char *fmt2,
++		  va_list args2)
++{
++	static char msg[CONFIG_RAT_PRINTK_TXT_MAX];
++	unsigned long flags;
++	unsigned int cpu, i, msg_len, l0, l1;
++
++	cpu = get_cpu();
++	lockdep_off();
++
++	/* Stolen from vprintk() with all due trepidation. */
++	if (unlikely(oops_in_progress && cpu == rpk_lock_cpu))
++		spin_lock_init(&rpk_lock);
++
++	spin_lock_irqsave(&rpk_lock, flags);
++	rpk_lock_cpu = cpu;
++
++	/* Encode printk() format string(s) and arguments. */
++	msg_len = rpk_encode2(msg, sizeof(msg), fmt1, args1, fmt2, args2);
++
++	if (msg_len == 0 || msg_len > CONFIG_RAT_PRINTK_TXT_MAX)
++		goto out;
++
++	/* Make room for msg in log.  We can't use {get,put}_unaligned
++	   because of wrap-around. */
++	while (2 + msg_len + rpk_log_end - rpk_log_begin > RPK_LOG_SIZE) {
++		l0 = *(unsigned char *)&RPK_LOG(rpk_log_begin++);
++		l1 = *(unsigned char *)&RPK_LOG(rpk_log_begin++);
++		rpk_log_begin += l0 | (l1 << 8);
++	}
++
++	/* Store message length. */
++	*(unsigned char *)&RPK_LOG(rpk_log_end++) = msg_len;
++	*(unsigned char *)&RPK_LOG(rpk_log_end++) = msg_len >> 8;
++
++	/* Push message onto end of log. */
++	for (i = 0; i < msg_len; i++)
++		RPK_LOG(rpk_log_end++) = msg[i];
++
++      out:
++	/* Unlock the log and wake up any readers. */
++	rpk_lock_cpu = UINT_MAX;
++	spin_unlock_irqrestore(&rpk_lock, flags);
++	lockdep_on();
++	put_cpu();
++
++	wake_up_interruptible(&rpk_wait_queue);
++}
++
++/* proc methods. */
++
++static ssize_t
++rpk_proc_read(struct file *file, char __user * buf, size_t len, loff_t * off)
++{
++	char msg[CONFIG_RAT_PRINTK_TXT_MAX];
++	unsigned int i, l0, l1, msg_begin;
++	size_t msg_len, pos = 0;
++
++	/* Wait for some chit-chat from printk(). */
++	spin_lock_irq(&rpk_lock);
++
++	while (rpk_log_begin == rpk_log_end) {
++		spin_unlock_irq(&rpk_lock);
++
++		if (file->f_flags & O_NONBLOCK)
++			return -EAGAIN;
++
++		if (wait_event_interruptible(rpk_wait_queue,
++					     rpk_log_begin != rpk_log_end))
++			return -ERESTARTSYS;
++
++		spin_lock_irq(&rpk_lock);
++	}
++
++	while (rpk_log_begin != rpk_log_end) {
++		l0 = *(unsigned char *)&RPK_LOG(rpk_log_begin);
++		l1 = *(unsigned char *)&RPK_LOG(rpk_log_begin + 1);
++		msg_len = l0 | (l1 << 8);
++
++		if (msg_len == 0 || msg_len > CONFIG_RAT_PRINTK_TXT_MAX)
++			/* TODO Eject CD tray as warning to user. */ ;
++
++		if (pos + msg_len > len)
++			break;
++
++		/* OK, it fits.  Save start of message and adjust rpk_log_begin. */
++		msg_begin = rpk_log_begin + 2;
++		rpk_log_begin += 2 + msg_len;
++
++		for (i = 0; i < msg_len; i++)
++			msg[i] = RPK_LOG(msg_begin + i);
++
++		spin_unlock_irq(&rpk_lock);
++
++		if (copy_to_user(buf + pos, msg, msg_len))
++			return -EFAULT;
++
++		pos += msg_len;
++
++		spin_lock_irq(&rpk_lock);
++	}
++
++	spin_unlock_irq(&rpk_lock);
++
++	if (pos == 0)
++		return -EMSGSIZE;
++
++	return pos;
++}
++
++static unsigned int rpk_proc_poll(struct file *file, poll_table * wait)
++{
++	poll_wait(file, &rpk_wait_queue, wait);
++	if (rpk_log_begin != rpk_log_end)
++		return POLLIN | POLLRDNORM;
++	return 0;
++}
++
++struct file_operations proc_rat_printk_operations = {
++	.read = rpk_proc_read,
++	.poll = rpk_proc_poll,
++};
++
++/* Encoding functions. */
++
++static int rpk_skip_atoi(const char **s)
++{
++	int i = 0;
++
++	while (isdigit(**s))
++		i = i * 10 + *((*s)++) - '0';
++
++	return i;
++}
++
++#define rpk_put(pos, end, c) \
++	do {                       \
++		int _c = (c);            \
++		if (pos < end)           \
++			*(pos++) = _c;         \
++	} while (0)
++
++/* Write num, no trailing NUL. */
++static char *rpk_num(char *pos, char *end, unsigned long long num, int sign)
++{
++	char tmp[66];
++	int i;
++
++	if (sign) {
++		if ((signed long long)num < 0) {
++			rpk_put(pos, end, '-');
++			num = -(signed long long)num;
++		}
++	}
++
++	i = 0;
++	if (num == 0) {
++		tmp[i++] = '0';
++	} else {
++		while (num != 0)
++			tmp[i++] = '0' + do_div(num, 10);
++	}
++
++	while (i-- > 0)
++		rpk_put(pos, end, tmp[i]);
++
++	return pos;
++}
++
++/* Write key, no trailing NUL. */
++static inline char *rpk_key(char *pos, char *end, int *key)
++{
++	return rpk_num(pos, end, (*key)++, 1);
++}
++
++/* Write min(strlen(str), prec) chars from str, no trailing NUL. */
++static inline char *rpk_str(char *pos, char *end, const char *str, int prec)
++{
++	for (; prec > 0 && *str != 0; prec--, str++)
++		rpk_put(pos, end, *str);
++
++	return pos;
++}
++
++/* Encode integer argument.  Format is "<key>:<argument-in-decimal>\0" */
++static char *rpk_encode_num(char *pos, char *end, int *key,
++			    unsigned long long num, int sign)
++{
++	pos = rpk_key(pos, end, key);
++	rpk_put(pos, end, ':');
++	pos = rpk_num(pos, end, num, sign);
++	rpk_put(pos, end, '\0');
++
++	return pos;
++}
++
++/* Encode string argument. Format is "<key>:<upto-prec-chars-from-string>\0" */
++static char *rpk_encode_str(char *pos, char *end, int *key, const char *str,
++			    int prec)
++{
++	pos = rpk_key(pos, end, key);
++	rpk_put(pos, end, ':');
++	pos = rpk_str(pos, end, str, prec);
++	rpk_put(pos, end, '\0');
++
++	return pos;
++}
++
++static char *rpk_encode_args(char *pos, char *end, int *key, const char *fmt,
++			     va_list args)
++{
++	int prec, qual, sign;
++	unsigned long long num;
++	const char *str;
++
++	for (; *fmt != 0; ++fmt) {
++		if (*fmt != '%')
++			continue;
++
++		/* Ignore all flags. */
++	      repeat:
++		++fmt;		/* This also skips the '%'. */
++		switch (*fmt) {
++		case '-':
++			goto repeat;
++		case '+':
++			goto repeat;
++		case ' ':
++			goto repeat;
++		case '#':
++			goto repeat;
++		case '0':
++			goto repeat;
++		}
++
++		/* Field width. */
++		if (isdigit(*fmt)) {	/* Ignore embedded field width. */
++			(void)rpk_skip_atoi(&fmt);
++		} else if (*fmt == '*') {	/* Specified by next argument. */
++			++fmt;
++			pos =
++			    rpk_encode_num(pos, end, key, va_arg(args, int), 1);
++		}
++
++		/* Precision. */
++		prec = INT_MAX;
++		if (*fmt == '.') {
++			++fmt;
++			if (isdigit(*fmt)) {
++				prec = rpk_skip_atoi(&fmt);
++			} else if (*fmt == '*') {	/* Specified by next argument. */
++				++fmt;
++				prec = va_arg(args, int);
++				pos = rpk_encode_num(pos, end, key, prec, 1);
++			}
++			if (prec < 0)
++				prec = 0;
++		}
++
++		/* Conversion qualifier. */
++		qual = 0;
++		if (*fmt == 'h' || *fmt == 'l' || *fmt == 'L' ||
++		    *fmt == 'Z' || *fmt == 'z' || *fmt == 't') {
++			qual = *fmt;
++			++fmt;
++
++			if (qual == 'h' && *fmt == 'h') {
++				qual = 'H';
++				++fmt;
++			}
++
++			if (qual == 'l' && *fmt == 'l') {
++				qual = 'L';
++				++fmt;
++			}
++		}
++
++		sign = 0;
++
++		switch (*fmt) {
++		case 'c':
++			pos =
++			    rpk_encode_num(pos, end, key, va_arg(args, int), 1);
++			continue;
++
++		case 's':
++			str = va_arg(args, char *);
++			if ((unsigned long)str < PAGE_SIZE)
++				str = "<NULL>";
++			pos = rpk_encode_str(pos, end, key, str, prec);
++			continue;
++
++		case 'p':
++			pos = rpk_encode_num(pos, end, key,
++					     (unsigned long)va_arg(args,
++								   void *), 0);
++			continue;
++
++		case 'n':	/* Ignore. */
++			(void)va_arg(args, void *);
++			continue;
++
++		case '%':
++			continue;
++
++			/* Integer number formats. */
++		case 'd':
++		case 'i':
++			sign = 1;
++		case 'o':
++		case 'u':
++		case 'x':
++		case 'X':
++			if (qual == 'L') {
++				num = va_arg(args, long long);
++			} else if (qual == 'l') {
++				num = va_arg(args, unsigned long);
++				if (sign)
++					num = (signed long)num;
++			} else if (qual == 'Z' || qual == 'z') {
++				num = va_arg(args, size_t);
++			} else if (qual == 't') {
++				num = va_arg(args, ptrdiff_t);
++			} else if (qual == 'h') {
++				num = (unsigned short)va_arg(args, int);
++				if (sign)
++					num = (signed short)num;
++			} else if (qual == 'H') {
++				num = (unsigned char)va_arg(args, int);
++				if (sign)
++					num = (signed char)num;
++			} else {
++				num = va_arg(args, unsigned int);
++				if (sign)
++					num = (signed int)num;
++			}
++
++			pos = rpk_encode_num(pos, end, key, num, sign);
++			continue;
++
++		default:	/* This is what the kernel's vsprintf does. */
++			if (*fmt == 0)
++				goto out;
++			continue;
++		}
++	}
++      out:
++	return pos;
++}
++
++static size_t rpk_encode2(char *buf, size_t size,
++			  const char *fmt1, va_list args1,
++			  const char *fmt2, va_list args2)
++{
++	char *pos = buf, *end = buf + size;
++	int key = 0;
++
++	/* Make sure end points past start of buf. */
++	if (end < buf)
++		end = (void *)-1;
++
++	/* Encode format string(s). */
++	pos = rpk_key(pos, end, &key);
++	rpk_put(pos, end, ':');
++	pos = rpk_str(pos, end, fmt1, INT_MAX);
++	if (fmt2 != NULL)
++		pos = rpk_str(pos, end, fmt2, INT_MAX);
++	rpk_put(pos, end, '\0');
++
++	/* Encode arguments. */
++	pos = rpk_encode_args(pos, end, &key, fmt1, args1);
++	if (fmt2 != NULL)
++		pos = rpk_encode_args(pos, end, &key, fmt2, args2);
++
++	/* Add a second trailing NUL. */
++	rpk_put(pos, end, '\0');
++
++	/* Do count trailing NULs towards length. */
++	return pos - buf;
++}
